@@ -1,0 +1,88 @@
+@startuml
+title Luồng xử lý Request (Flowchart)
+
+start
+:Client gửi Request;
+if (Có x-hmac không?) then (Không)
+  :Log: No HMAC;
+  :Trả về 400 Bad Request;
+  stop
+else (Có)
+  :Parse JSON Body;
+  if (Timestamp hợp lệ?) then (Quá cũ (>60s) hoặc Sai định dạng)
+    :Log: Bad Timestamp;
+    :Trả về 400 Bad Request;
+    stop
+  else (Hợp lệ)
+    if (Nonce đã tồn tại trong DB?) then (Có (Đã dùng))
+      :Log: Replay Attack;
+      :Trả về 409 Conflict;
+      stop
+    else (Chưa (Mới))
+      :Server tính toán HMAC;
+      if (So sánh HMAC?) then (Khác nhau)
+        :Log: Bad HMAC / Integrity Fail;
+        :Trả về 401 Unauthorized;
+        stop
+      else (Giống nhau)
+        :Lưu Nonce vào DB;
+        :Log: Verified;
+        :Xử lý nghiệp vụ;
+        :Trả về 200 OK;
+        stop
+      endif
+    endif
+  endif
+endif
+@enduml
+
+@startuml
+title Biểu đồ tuần tự (Sequence Diagram)
+
+actor "Người dùng" as User
+participant "Browser (Client)" as Client
+participant "Node.js Server" as Server
+database "SQLite Database" as DB
+
+note over User, Client: Giai đoạn chuẩn bị
+User -> Client: Nhập Action, Amount, Message
+User -> Client: Bấm "Gửi Request"
+
+Client -> Client: Tạo Timestamp (Hiện tại)
+Client -> Client: Tạo Nonce (UUID ngẫu nhiên)
+Client -> Client: Tạo JSON Payload
+Client -> Client: Tính HMAC(Secret, Payload)
+
+note over Client, Server: Giai đoạn gửi tin
+Client -> Server: POST /api (Body + Header x-hmac)
+
+note over Server, DB: Giai đoạn xác thực (Server)
+
+alt Không có Header HMAC
+    Server --> Client: 400 Bad Request (No HMAC)
+else Có Header HMAC
+    Server -> Server: Kiểm tra Timestamp (±60s)
+    alt Timestamp lỗi hoặc hết hạn
+        Server --> Client: 400 Bad Request (Bad Timestamp)
+    else Timestamp hợp lệ
+        Server -> DB: Kiểm tra Nonce (SELECT 1 FROM nonces...)
+        DB --> Server: Kết quả tìm kiếm
+        
+        alt Nonce đã tồn tại (Replay Attack)
+            Server --> Client: 409 Conflict (Replay Nonce Used)
+        else Nonce hợp lệ (Chưa dùng)
+            Server -> Server: Tự tính HMAC(Secret, Body nhận được)
+            Server -> Server: So sánh (ClientHMAC == ServerHMAC)
+            
+            alt Chữ ký sai (Dữ liệu bị sửa hoặc sai Key)
+                Server -> DB: Log thất bại
+                Server --> Client: 401 Unauthorized (Bad HMAC)
+            else Chữ ký đúng (Verified)
+                Server -> DB: INSERT Nonce (Đánh dấu đã dùng)
+                Server -> DB: Log thành công
+                Server --> Client: 200 OK (Verified)
+            end
+        end
+    end
+end
+@enduml
